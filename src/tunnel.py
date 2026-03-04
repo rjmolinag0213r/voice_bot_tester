@@ -1,5 +1,8 @@
-"""ngrok tunnel manager for exposing the local webhook server to Twilio."""
+"""Cloudflare tunnel manager for exposing the local webhook server to Twilio."""
+import subprocess
+import threading
 import time
+import re
 from typing import Optional
 
 from src.utils.logger import setup_logger
@@ -8,7 +11,7 @@ logger = setup_logger(__name__)
 
 
 class TunnelManager:
-    """Manages an ngrok tunnel to expose the local webhook server."""
+    """Manages a Cloudflare (cloudflared) tunnel to expose the local webhook server."""
 
     def __init__(self, port: int = 5000):
         """Initialize the tunnel manager.
@@ -18,50 +21,40 @@ class TunnelManager:
         """
         self.port = port
         self.public_url: Optional[str] = None
-        self._tunnel = None
+        self._process: Optional[subprocess.Popen] = None
 
     def start(self) -> str:
-        """Start the ngrok tunnel and return the public URL.
+        """Start the cloudflared tunnel and return the public URL.
 
         Returns:
             Public HTTPS URL
 
         Raises:
-            RuntimeError: If tunnel cannot be started
+            RuntimeError: If tunnel cannot be started or URL not found
         """
         try:
-            from pyngrok import ngrok, conf
-
-            # Kill any existing tunnels to avoid conflicts
-            ngrok.kill()
-            time.sleep(1)
-
-            logger.info(f"Starting ngrok tunnel on port {self.port}...")
-            self._tunnel = ngrok.connect(self.port, "http")
-            self.public_url = self._tunnel.public_url
-
-            # Prefer HTTPS
-            if self.public_url.startswith("http://"):
-                self.public_url = self.public_url.replace("http://", "https://", 1)
-
-            logger.info(f"Tunnel active: {self.public_url}")
-            return self.public_url
-
+            from pycloudflared import try_cloudflare
         except ImportError:
             raise RuntimeError(
-                "pyngrok is not installed. Run: pip install pyngrok"
+                "pycloudflared is not installed. Run: pip install pycloudflared"
             )
+
+        logger.info(f"Starting Cloudflare tunnel on port {self.port}...")
+        try:
+            result = try_cloudflare(self.port, verbose=False)
+            self.public_url = result.tunnel
+            logger.info(f"Cloudflare tunnel active: {self.public_url}")
+            return self.public_url
         except Exception as e:
-            raise RuntimeError(f"Failed to start ngrok tunnel: {e}")
+            raise RuntimeError(f"Failed to start Cloudflare tunnel: {e}")
 
     def stop(self) -> None:
-        """Stop the ngrok tunnel."""
+        """Stop the Cloudflare tunnel."""
         try:
-            from pyngrok import ngrok
-            ngrok.kill()
-            logger.info("ngrok tunnel stopped")
+            from pycloudflared import try_cloudflare
+            try_cloudflare.terminate(self.port)
+            logger.info("Cloudflare tunnel stopped")
         except Exception as e:
             logger.warning(f"Error stopping tunnel: {e}")
         finally:
             self.public_url = None
-            self._tunnel = None
