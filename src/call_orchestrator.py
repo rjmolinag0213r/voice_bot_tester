@@ -14,6 +14,7 @@ from src.utils.transcription import TranscriptionService
 from src.utils.bug_detector import BugDetector
 from src.utils.report_generator import ReportGenerator
 from src.utils.logger import setup_logger
+import src.webhook_server as webhook_server
 
 logger = setup_logger(__name__)
 
@@ -45,14 +46,32 @@ class CallOrchestrator:
         self.transcription_service = TranscriptionService(settings.openrouter_api_key)
         self.bug_detector = BugDetector()
         self.report_generator = ReportGenerator()
-        
+
         # Get all personas
         self.personas = PersonaFactory.get_all_personas()
-        
+
         # Test execution tracking
         self.call_results: List[Dict[str, Any]] = []
-        
+
+        # Webhook base URL — set via set_webhook_url() before running
+        self.webhook_base_url: Optional[str] = None
+
         logger.info("Call orchestrator initialized")
+
+    def set_webhook_url(self, public_url: str) -> None:
+        """Set the ngrok public URL for the webhook server.
+
+        Args:
+            public_url: Public HTTPS URL (e.g. https://abc123.ngrok.io)
+        """
+        self.webhook_base_url = public_url.rstrip("/")
+        webhook_server.init_server(self.llm_client, self.webhook_base_url)
+        logger.info(f"Webhook URL configured: {self.webhook_base_url}")
+
+    @staticmethod
+    def _persona_url_key(persona: BasePersona) -> str:
+        """Convert persona name to URL-safe key used by the webhook."""
+        return persona.name.lower().replace("the ", "").replace(" ", "_")
     
     def run_test_suite(self, num_calls: int = None) -> Dict[str, Any]:
         """Run the complete test suite.
@@ -164,23 +183,19 @@ class CallOrchestrator:
         }
         
         try:
-            # NOTE: In a production implementation, you would:
-            # 1. Set up a TwiML webhook endpoint to handle the call flow
-            # 2. Use Twilio's WebSocket for real-time audio streaming
-            # 3. Stream audio to/from your LLM for conversation
-            # 4. Record the entire conversation
-            #
-            # This is a simplified simulation for demonstration purposes
-            
-            logger.info("Simulating call (in production, would make real Twilio call)...")
-            
-            # Simulate call initiation
-            call_info = self._simulate_call(persona, call_id)
+            if self.webhook_base_url:
+                # --- REAL CALL via Twilio + webhook server ---
+                call_info = self._make_real_call(persona, call_id)
+            else:
+                # --- SIMULATION fallback ---
+                logger.info("No webhook URL configured — running in simulation mode.")
+                call_info = self._simulate_call(persona, call_id)
             
             result['status'] = call_info['status']
             result['duration'] = call_info['duration']
             result['recording_path'] = call_info.get('recording_path')
-            
+            result['call_sid'] = call_info.get('call_sid')
+
             # Generate/get transcript
             transcript = self._get_transcript(call_info, persona)
             
@@ -219,6 +234,67 @@ class CallOrchestrator:
         
         return result
     
+    def _make_real_call(
+        self,
+        persona: BasePersona,
+        call_id: str,
+    ) -> Dict[str, Any]:
+        """Make a real outbound call via Twilio and drive the conversation live.
+
+        Args:
+            persona: Persona for the call
+            call_id: Call identifier
+
+        Returns:
+            Call information dictionary
+        """
+        persona_key = self._persona_url_key(persona)
+        start_url = (
+            f"{self.webhook_base_url}/start"
+            f"?persona={persona_key}&call_id={call_id}"
+        )
+        status_url = f"{self.webhook_base_url}/status"
+
+        logger.info(f"Making real Twilio call to {self.settings.target_phone_number}")
+        logger.info(f"Webhook URL: {start_url}")
+
+        call_details = self.twilio_client.make_call(
+            to_number=self.settings.target_phone_number,
+            twiml_url=start_url,
+            record=True,
+            timeout=60
+        )
+
+        if not call_details:
+            logger.error("Twilio failed to initiate the call.")
+            return {"status": "failed", "duration": 0, "call_sid": None}
+
+        call_sid = call_details["sid"]
+        logger.info(f"Call initiated — SID: {call_sid}")
+
+        # Wait for the call to complete (up to 5 minutes)
+        completed = self.twilio_client.wait_for_call_completion(call_sid, max_wait=300)
+        status = "completed" if completed else "timeout"
+
+        # Estimate duration from session if available
+        session = webhook_server.get_session(call_sid)
+        duration = 0
+        if session and session.get("started_at") and session.get("ended_at"):
+            from datetime import datetime as _dt
+            try:
+                start = _dt.fromisoformat(session["started_at"])
+                end = _dt.fromisoformat(session["ended_at"])
+                duration = int((end - start).total_seconds())
+            except Exception:
+                pass
+
+        return {
+            "status": status,
+            "duration": duration,
+            "call_sid": call_sid,
+            "recording_path": None,  # Recording handled by Twilio
+        }
+
     def _simulate_call(
         self,
         persona: BasePersona,
@@ -371,18 +447,22 @@ class CallOrchestrator:
 """
     
     def _get_transcript(self, call_info: Dict[str, Any], persona: BasePersona) -> str:
-        """Get transcript from call recording or simulation.
-        
+        """Get transcript from webhook session (real call) or simulation.
+
         Args:
             call_info: Call information
             persona: Persona used
-            
+
         Returns:
             Transcript text
         """
-        # In production, would transcribe actual recording
-        # For now, return simulated conversation
-        return call_info.get('conversation', 'No transcript available')
+        call_sid = call_info.get("call_sid")
+        if call_sid:
+            transcript = webhook_server.get_transcript(call_sid)
+            if transcript:
+                return transcript
+        # Fallback for simulation mode
+        return call_info.get("conversation", "No transcript available")
     
     def _generate_summary(self) -> Dict[str, Any]:
         """Generate test execution summary.

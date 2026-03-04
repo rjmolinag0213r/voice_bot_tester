@@ -2,12 +2,15 @@
 """Main entry point for the Voice Bot Testing System."""
 import sys
 import argparse
+import threading
 from pathlib import Path
 
 from src.config import get_settings
 from src.call_orchestrator import CallOrchestrator
 from src.personas.persona_factory import PersonaFactory
+from src.tunnel import TunnelManager
 from src.utils.logger import setup_logger
+import src.webhook_server as webhook_server
 
 logger = setup_logger(__name__)
 
@@ -84,13 +87,38 @@ def main():
             # Load settings
             logger.info("Loading configuration...")
             settings = get_settings()
-            
-            # Create orchestrator
+
+            # Start Flask webhook server in a background thread
+            logger.info("Starting webhook server on port 5000...")
+            server_thread = threading.Thread(
+                target=lambda: webhook_server.app.run(
+                    host="0.0.0.0", port=5000, debug=False, use_reloader=False
+                ),
+                daemon=True
+            )
+            server_thread.start()
+
+            # Start ngrok tunnel
+            tunnel = TunnelManager(port=5000)
+            try:
+                public_url = tunnel.start()
+                logger.info(f"Public webhook URL: {public_url}")
+            except RuntimeError as e:
+                logger.error(f"Could not start ngrok tunnel: {e}")
+                logger.warning("Falling back to simulation mode (no real calls will be made).")
+                public_url = None
+
+            # Create orchestrator and wire up webhook URL
             orchestrator = CallOrchestrator(settings)
-            
+            if public_url:
+                orchestrator.set_webhook_url(public_url)
+
             # Run tests
             num_calls = args.calls if args.calls else None
-            summary = orchestrator.run_test_suite(num_calls=num_calls)
+            try:
+                summary = orchestrator.run_test_suite(num_calls=num_calls)
+            finally:
+                tunnel.stop()
             
             # Print summary
             print("\n" + "="*80)
