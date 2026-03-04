@@ -1,0 +1,38 @@
+# Secrets - never commit real credentials
+.env
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Generated output
+logs/
+recordings/
+reports/bug_report.md
+reports/test_results.json
+reports/transcript_*.txt
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
