@@ -44,7 +44,7 @@ class PersonaFactory:
             "edge_case": EdgeCasePersona()
         }
         
-        name_lower = name.lower().replace(" ", "_")
+        name_lower = name.lower().replace(" ", "_").replace("-", "_")
         if name_lower in personas:
             return personas[name_lower]
         
